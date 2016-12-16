@@ -43,6 +43,44 @@ data L2BF = L2ValInc   !Int64 !Word8
           | L2While    !Int64 [L2BF]
     deriving (Show)
 
+
+l2_to_bf :: [L2BF] -> BF.Program
+l2_to_bf = flip evalState 0 . go where
+    go prog = concat <$> mapM f prog
+    f (L2ValInc i w) = (++) <$> move i <*> pure [BF.ValInc w]
+    f (L2IOOutput i) = (++) <$> move i <*> pure [BF.IOOutput]
+    f (L2IORead   i) = (++) <$> move i <*> pure [BF.IORead]
+    f (L2While i cs) = do cond1 <- move i
+                          body  <- go cs
+                          cond2 <- move i
+                          return (cond1 ++ [BF.While (body ++ cond2)])
+    move :: Int64 -> State Int64 [BF.BF]
+    move n = do curr <- get
+                put n
+                return $ if n >= curr
+                         then [BF.PtrInc (n - curr)]
+                         else [BF.PtrInc (curr - n)]
+
+l1_to_l2 :: [L1BF] -> [L2BF]
+l1_to_l2 = concatMap comp where
+        local0 = 0
+        comp (L1ValInc a x) = [L2ValInc (a+16) x]
+        comp (L1IOOutput a) = [L2IOOutput (a+16)]
+        comp (L1IORead   a) = [L2IORead (a+16)]
+        comp (L1While a xs) = [L2While (a+16) (l1_to_l2 xs)]
+        comp (L1Set   a nw) = [L2While (a+16) [L2ValInc (a+16) (-1)]
+                              ,L2ValInc (a+16) nw]
+        comp (L1Move  a b ) = [L2While (a+16) [L2ValInc (a+16) (-1)]
+                              ,L2While (b+16) [L2ValInc (b+16) (-1)
+                                              ,L2ValInc (a+16)   1]]
+        comp (L1Copy  a b ) = [L2While (a+16) [L2ValInc (a+16) (-1)]
+                              ,L2While local0 [L2ValInc local0 (-1)]
+                              ,L2While (b+16) [L2ValInc (b+16) (-1)
+                                              ,L2ValInc (a+16)   1
+                                              ,L2ValInc local0   1]
+                              ,L2While local0 [L2ValInc local0 (-1)
+                                              ,L2ValInc (b+16)   1]]
+
 data CompilerSettings = CompilerSettings {
 
 } deriving (Show)
@@ -55,12 +93,12 @@ data CompilerError = VariableNotFound {- `stack` trace -} [Ident] !Ident
                    | FuckedUp
             deriving (Show)
 
-compile :: CompilerSettings -> Program -> Either CompilerError [L1BF]
+compile :: CompilerSettings -> Program -> Either CompilerError BF.Program
 compile _ p = Right (flip evalState (CK [] M.empty) $ do
                                 genCompilerStack p
                                 mainRes <- dk_declare "#main_res"
                                 main    <- dk_lookup_fun "main"
-                                compileFuncall mainRes main [])
+                                (l2_to_bf . l1_to_l2) <$> compileFuncall mainRes main [])
 
 {- variables starting with # are reversed for compiler internals -}
 

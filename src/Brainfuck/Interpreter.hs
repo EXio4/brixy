@@ -1,4 +1,4 @@
-module Brainfuck.Interpreter (eval_naive,InterpreterResult(..), move) where
+module Brainfuck.Interpreter (eval_naive,InterpreterResult(..)) where
 
 import           Control.Monad.Trans.State
 import           Brainfuck.Types
