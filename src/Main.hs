@@ -1,5 +1,6 @@
 module Main where
 
+import qualified Brainfuck.Types as BF
 import Brainfuck.Interpreter
 
 import Brixy.AST
@@ -34,6 +35,13 @@ test_brixy_prog =
             ,CallE (CallF (Ident "factorial") [Lit 4])
             ]
         ]
+
+--gen :: [Statement] -> ([L1BF], [L2BF], BF.Program)
+
+gen fn mainBody = case fn defSettings (Module "Main" [Function (Ident "main") [] mainBody]) of
+                    Left{} -> error ".."
+                    Right p -> p
+
 
 main :: IO ()
 main = putStrLn "Hello, Haskell!"

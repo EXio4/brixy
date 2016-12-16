@@ -1,4 +1,4 @@
-module Brixy.Compiler (defSettings, compile) where
+module Brixy.Compiler (defSettings, compile, compile_complete) where
 
 import           Brixy.AST
 import qualified Brainfuck.Types as BF
@@ -57,9 +57,8 @@ l2_to_bf = flip evalState 0 . go where
     move :: Int64 -> State Int64 [BF.BF]
     move n = do curr <- get
                 put n
-                return $ if n >= curr
-                         then [BF.PtrInc (n - curr)]
-                         else [BF.PtrInc (curr - n)]
+                return [BF.PtrInc (n - curr)]
+
 
 l1_to_l2 :: [L1BF] -> [L2BF]
 l1_to_l2 = concatMap comp where
@@ -98,7 +97,21 @@ compile _ p = Right (flip evalState (CK [] M.empty) $ do
                                 genCompilerStack p
                                 mainRes <- dk_declare "#main_res"
                                 main    <- dk_lookup_fun "main"
-                                (l2_to_bf . l1_to_l2) <$> compileFuncall mainRes main [])
+                                l1 <- compileFuncall mainRes main []
+                                let l2 = l1_to_l2 l1
+                                let bf = l2_to_bf l2
+                                return bf)
+
+
+compile_complete :: CompilerSettings -> Program -> Either CompilerError ([L1BF], [L2BF], BF.Program)
+compile_complete  _ p = Right (flip evalState (CK [] M.empty) $ do
+                                genCompilerStack p
+                                mainRes <- dk_declare "#main_res"
+                                main    <- dk_lookup_fun "main"
+                                l1 <- compileFuncall mainRes main []
+                                let l2 = l1_to_l2 l1
+                                let bf = l2_to_bf l2
+                                return (l1,l2,bf))
 
 {- variables starting with # are reversed for compiler internals -}
 
@@ -250,7 +263,13 @@ compileStatements resAddr (x:xs) =
                                 compileStatements resAddr xs
          Assign (Ident n) expr -> do ir <- dk_lookup n
                                      (++) <$> compileExpr ir expr <*> compileStatements resAddr xs
-         Print  expr -> (\xs ys -> xs ++ [L1IOOutput resAddr] ++ ys) <$> compileExpr resAddr expr <*> compileStatements resAddr xs
+         Print  expr -> do dk_enter "#print"
+                           p_r <- dk_declare "#pr_result"
+                           cod <- compileExpr p_r expr
+                           dk_leave
+                           rest <- compileStatements resAddr xs
+                           return (cod ++ [L1IOOutput p_r] ++ rest)
+                           
          While expr stms -> do dk_enter "#while"
                                cnd <- dk_declare "#while_cond"
                                condCode <- compileExpr cnd expr
@@ -273,6 +292,7 @@ compileStatements resAddr (x:xs) =
                                             [L1While condE
                                                 (trueCode ++
                                                 [L1ValInc temp0 (-1)
+                                                ,L1Set    condE 0
                                                 ])
                                             ,L1While temp0
                                                 (falseCode ++
