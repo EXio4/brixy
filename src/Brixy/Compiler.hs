@@ -174,48 +174,54 @@ compileExpr resAddr (VL (Ident name)) = do i <- dk_lookup name
                                            return [L1Copy resAddr i]
 compileExpr resAddr (Lit w)           = do return [L1Set  resAddr w]
 compileExpr resAddr (Add e1 e2)       = do dk_enter "#addition"
+                                           i1 <- dk_declare "#e1"
                                            i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr resAddr e1
+                                           v1 <- compileExpr i1 e1
                                            v2 <- compileExpr i2 e2
                                            dk_leave
                                            return (
-                                            [L1Set resAddr 0
+                                            [L1Set i1      0
                                             ,L1Set i2      0] ++ v1 ++ v2 ++
                                             [L1While i2
                                                 [L1ValInc i2 (-1)
-                                                ,L1ValInc resAddr 1
-                                             ]
+                                                ,L1ValInc i1 1
+                                                ]
+                                            ,L1Copy resAddr i1
                                             ])
 compileExpr resAddr (Minus e1 e2)     = do dk_enter "#substraction"
+                                           i1 <- dk_declare "#e1"
                                            i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr resAddr e1
+                                           v1 <- compileExpr i1 e1
                                            v2 <- compileExpr i2 e2
                                            dk_leave
                                            return (
-                                            [L1Set resAddr 0
+                                            [L1Set i1      0
                                             ,L1Set i2      0] ++ v1 ++ v2 ++
                                             [L1While i2
                                                 [L1ValInc i2 (-1)
-                                                ,L1ValInc resAddr (-1)
+                                                ,L1ValInc i1 (-1)
                                                 ]
+                                            ,L1Copy resAddr i1
                                             ])
 compileExpr resAddr (Equal e1 e2)     = do dk_enter "#equal"
+                                           i1 <- dk_declare "#e1"
                                            i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr resAddr e1
+                                           v1 <- compileExpr i1 e1
                                            v2 <- compileExpr i2 e2
                                            dk_leave
                                            return (
-                                            [L1Set resAddr 0
+                                            [L1Set i1      0
                                             ,L1Set i2      0] ++ v1 ++ v2 ++
-                                            [L1While resAddr
-                                                [L1ValInc resAddr (-1)
-                                                ,L1ValInc i2      (-1)
+                                            [L1While i1
+                                                [L1ValInc i1 (-1)
+                                                ,L1ValInc i2 (-1)
                                                 ]
-                                            ,L1ValInc resAddr 1
+                                            ,L1ValInc i1 1
                                             ,L1While i2
-                                                [L1ValInc resAddr (-1)
-                                                ,L1Set    i2      0
+                                                [L1ValInc i1 (-1)
+                                                ,L1Set    i2   0
                                                 ]
+                                            ,L1Copy resAddr i1
                                             ])
 
 compileExpr resAddr (CallF (Ident n) exps) =  do dk_enter ("#funcall_expr_" ++ n)
@@ -224,12 +230,14 @@ compileExpr resAddr (CallF (Ident n) exps) =  do dk_enter ("#funcall_expr_" ++ n
                                                                     xcd <- compileExpr i_n ex
                                                                     return (L1Set i_n 0 : xcd, i_n)
                                                  fun <- dk_lookup_fun n
-                                                 code <- compileFuncall resAddr fun (map snd xs)
+                                                 res <- dk_declare "#res"
+                                                 code <- compileFuncall res fun (map snd xs)
                                                  dk_leave
                                                  return (
-                                                    [L1Set resAddr 0
-                                                    ] ++ concatMap fst xs ++ code
-                                                    )
+                                                    [L1Set res 0
+                                                    ] ++ concatMap fst xs ++ code ++
+                                                    [L1Copy resAddr res
+                                                    ])
 
 compileFuncall :: Int64 -> FunctionDef -> [Int64] -> State CompilerStack [L1BF]
 compileFuncall resAddr (FunctionDef params stms) paramsAddrs = do
