@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 module Brixy.Compiler (defSettings, compile, compile_complete) where
 
 import           Brixy.AST
@@ -6,6 +7,7 @@ import qualified Brainfuck.Types as BF
 import qualified Data.Map as M
 import qualified Data.Set as S
 import           Data.Int
+import           Data.List
 import           Data.Word
 
 import           Control.Monad.Trans.State
@@ -43,22 +45,49 @@ data L2BF = L2ValInc   !Int64 !Word8
           | L2While    !Int64 [L2BF]
     deriving (Show)
 
+data L3BF = L3ValInc !Word8
+          | L3IOOutput
+          | L3IORead
+          | L3While [L3BF]
+          | L3Move  !L3Ptr
+          | L3PtrInc !Int64
 
-l2_to_bf :: [L2BF] -> BF.Program
-l2_to_bf = flip evalState 0 . go where
+data L3Ptr = L3Abs !Int64
+           | L3End
+
+
+l3_to_bf :: Int64 -> [L3BF] -> BF.Program
+l3_to_bf maxPtr = flip evalState 0 . go where
     go prog = concat <$> mapM f prog
-    f (L2ValInc i w) = (++) <$> move i <*> pure [BF.ValInc w]
-    f (L2IOOutput i) = (++) <$> move i <*> pure [BF.IOOutput]
-    f (L2IORead   i) = (++) <$> move i <*> pure [BF.IORead]
-    f (L2While i cs) = do cond1 <- move i
-                          body  <- go cs
-                          cond2 <- move i
-                          return (cond1 ++ [BF.While (body ++ cond2)])
+    f (L3ValInc w) = pure [BF.ValInc w]
+    f (L3IOOutput) = pure [BF.IOOutput]
+    f (L3IORead  ) = pure [BF.IORead]
+    f (L3While cs) =  do { x <- go cs; pure [BF.While x]; }
+    f (L3PtrInc i) = pure [BF.PtrInc i]
+    f (L3Move ptr) = case ptr of L3Abs x -> move x
+                                 L3End   -> move maxPtr
     move :: Int64 -> State Int64 [BF.BF]
     move n = do curr <- get
                 put n
                 return [BF.PtrInc (n - curr)]
 
+l2_to_l3 :: [L2BF] -> (Int64, [L3BF])
+l2_to_l3 xs = (maxList xs, convert xs) where
+        maxList = foldl' maxPtr 0
+        maxPtr !acc (L2ValInc i _) = max acc i
+        maxPtr !acc (L2IOOutput i) = max acc i
+        maxPtr !acc (L2IORead   i) = max acc i
+        maxPtr !acc (L2While i xs) = max (max acc i) (maxList xs)
+
+        convert = concatMap go
+
+        go (L2ValInc   i w) = [L3Move (L3Abs i), L3ValInc w]
+        go (L2IOOutput i  ) = [L3Move (L3Abs i), L3IOOutput]
+        go (L2IORead   i  ) = [L3Move (L3Abs i), L3IORead  ]
+        go (L2While   i xs) = [L3Move (L3Abs i), L3While (convert xs ++ [L3Move (L3Abs i)])]
+
+l1optimizer_simple :: [L1BF] -> [L1BF]
+l1optimizer_simple = id
 
 l1_to_l2 :: [L1BF] -> [L2BF]
 l1_to_l2 = concatMap comp where
@@ -93,25 +122,19 @@ data CompilerError = VariableNotFound {- `stack` trace -} [Ident] !Ident
             deriving (Show)
 
 compile :: CompilerSettings -> Program -> Either CompilerError BF.Program
-compile _ p = Right (flip evalState (CK [] M.empty) $ do
-                                genCompilerStack p
-                                mainRes <- dk_declare "#main_res"
-                                main    <- dk_lookup_fun "main"
-                                l1 <- compileFuncall mainRes main []
-                                let l2 = l1_to_l2 l1
-                                let bf = l2_to_bf l2
-                                return bf)
+compile s p = fmap (\(_, _, _, p) -> p) (compile_complete s p)
 
 
-compile_complete :: CompilerSettings -> Program -> Either CompilerError ([L1BF], [L2BF], BF.Program)
+compile_complete :: CompilerSettings -> Program -> Either CompilerError ([L1BF], [L2BF], [L3BF], BF.Program)
 compile_complete  _ p = Right (flip evalState (CK [] M.empty) $ do
                                 genCompilerStack p
                                 mainRes <- dk_declare "#main_res"
                                 main    <- dk_lookup_fun "main"
                                 l1 <- compileFuncall mainRes main []
                                 let l2 = l1_to_l2 l1
-                                let bf = l2_to_bf l2
-                                return (l1,l2,bf))
+                                let (maxPtr, l3) = l2_to_l3 l2
+                                let bf = l3_to_bf maxPtr l3
+                                return (l1,l2,l3,bf))
 
 {- variables starting with # are reversed for compiler internals -}
 
@@ -307,3 +330,4 @@ compileStatements resAddr (x:xs) =
                                                 [L1ValInc temp0 (-1)
                                                 ])
                                             ])
+

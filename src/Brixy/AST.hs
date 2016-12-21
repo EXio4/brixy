@@ -17,6 +17,7 @@ data Ident = Ident !String
     deriving (Show)
 
 data Statement = CallE  !Expr
+--               | EBF    !EBF
                | Decl   !Ident
                | Assign !Ident !Expr
                | While  !Expr [Statement]
@@ -32,7 +33,6 @@ data Expr = VL !Ident {- var lookup -}
           | Equal !Expr !Expr
           | CallF !Ident ![Expr]
     deriving (Show)
-
 
 prettyPrint :: Program -> String
 prettyPrint = (`go1` []) where
