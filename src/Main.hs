@@ -73,6 +73,37 @@ prog3 =
             ]
         ]
 
+prog4 =
+    Module "Main"
+        [Function (Ident "add") [Ident "i1", Ident "i2"]
+            [EBF (EBWhile (EIndir (Ident "i2"))
+                    [EBValInc (EIndir (Ident "i2")) (-1)
+                    ,EBValInc (EIndir (Ident "i1")) 1
+                    ])
+            ,Return (VL (Ident "i1"))
+            ]
+        ,Function (Ident "main") []
+            [Print (CallF (Ident "add") [Lit 2, Lit 3])
+            ]
+        ]
+{-
+compileExpr resAddr (Add e1 e2)       = do dk_enter "#addition"
+                                           i1 <- dk_declare "#e1"
+                                           i2 <- dk_declare "#e2"
+                                           v1 <- compileExpr i1 e1
+                                           v2 <- compileExpr i2 e2
+                                           dk_leave
+                                           return (
+                                            [L1Set i1      0
+                                            ,L1Set i2      0] ++ v1 ++ v2 ++
+                                            [L1While i2
+                                                [L1ValInc i2 (-1)
+                                                ,L1ValInc i1 1
+                                                ]
+                                            ,L1Copy resAddr i1
+                                            ])
+                                            -}
+
 run p = ir_stdout $ eval_naive (case compile defSettings p of Right w -> w) []
 
 

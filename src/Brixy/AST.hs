@@ -1,6 +1,6 @@
 module Brixy.AST where
 
-
+import Data.Int
 import Data.Word
 
 type ModuleName = String
@@ -17,7 +17,7 @@ data Ident = Ident !String
     deriving (Show)
 
 data Statement = CallE  !Expr
---               | EBF    !EBF
+               | EBF    !EBF
                | Decl   !Ident
                | Assign !Ident !Expr
                | While  !Expr [Statement]
@@ -32,6 +32,34 @@ data Expr = VL !Ident {- var lookup -}
           | Minus !Expr !Expr
           | Equal !Expr !Expr
           | CallF !Ident ![Expr]
+    deriving (Show)
+
+{- L1-based high-level BF -}
+data EBF = EBValInc   !EPtr !Word8
+         | EBIOOutput !EPtr
+         | EBIORead   !EPtr
+         | EBWhile    !EPtr [EBF]
+         | EBSet      !EPtr !Word8
+         | EBCopy     !EPtr !EPtr
+         | EBMove     !EPtr !EPtr
+         | EBLowLevel [ELLBF]
+    deriving (Show)
+
+data EPtr = EAbs   !Int64
+          | EIndir !Ident
+    deriving (Show)
+
+data EPtrX = EAbsX   !Int64
+           | EIndirX !Ident
+           | EEndX
+    deriving (Show)
+
+data ELLBF = ELLValInc !Word8
+           | ELLIOOutput
+           | ELLIORead
+           | ELLWhile [ELLBF]
+           | ELLMove  !EPtrX
+           | ELLPtrInc !Int64
     deriving (Show)
 
 prettyPrint :: Program -> String
@@ -54,6 +82,7 @@ prettyPrint = (`go1` []) where
                  . (replicate (4 * (n-1)) ' ' ++) . k "}"
 
     go3 _ (CallE ex) = go4 ex
+    go3 _ (EBF{}) = k "<internal bf code>"
     go3 _ (Decl  (Ident name)) = k "var " . k name
     go3 _ (Assign (Ident name) expr) = k name . k " := " . go4 expr
     go3 n (While  expr stms) = k "while (" . go4 expr . k ") " . gos (n+1) stms

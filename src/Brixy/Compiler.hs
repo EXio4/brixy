@@ -37,12 +37,14 @@ data L1BF = L1ValInc   !Int64 !Word8
           | L1Set      !Int64 !Word8
           | L1Copy     !Int64 !Int64
           | L1Move     !Int64 !Int64
+          | L1LowLevel [L3BF]
     deriving (Show)
 
 data L2BF = L2ValInc   !Int64 !Word8
           | L2IOOutput !Int64
           | L2IORead   !Int64
           | L2While    !Int64 [L2BF]
+          | L2LowLevel [L3BF]
     deriving (Show)
 
 data L3BF = L3ValInc !Word8
@@ -51,13 +53,15 @@ data L3BF = L3ValInc !Word8
           | L3While [L3BF]
           | L3Move  !L3Ptr
           | L3PtrInc !Int64
+    deriving (Show)
 
 data L3Ptr = L3Abs !Int64
            | L3End
+    deriving (Show)
 
 
-l3_to_bf :: Int64 -> [L3BF] -> BF.Program
-l3_to_bf maxPtr = flip evalState 0 . go where
+l3_to_bf :: [L3BF] -> BF.Program
+l3_to_bf prog = (flip evalState 0 . go) prog where
     go prog = concat <$> mapM f prog
     f (L3ValInc w) = pure [BF.ValInc w]
     f (L3IOOutput) = pure [BF.IOOutput]
@@ -71,20 +75,26 @@ l3_to_bf maxPtr = flip evalState 0 . go where
                 put n
                 return [BF.PtrInc (n - curr)]
 
-l2_to_l3 :: [L2BF] -> (Int64, [L3BF])
-l2_to_l3 xs = (maxList xs, convert xs) where
-        maxList = foldl' maxPtr 0
-        maxPtr !acc (L2ValInc i _) = max acc i
-        maxPtr !acc (L2IOOutput i) = max acc i
-        maxPtr !acc (L2IORead   i) = max acc i
-        maxPtr !acc (L2While i xs) = max (max acc i) (maxList xs)
+    maxPtr = maxList prog
+    maxList = foldl' maxTwo 0
+    maxTwo !acc (L3ValInc _) = acc
+    maxTwo !acc (L3IOOutput) = acc
+    maxTwo !acc (L3IORead  ) = acc
+    maxTwo !acc (L3While xs) = max acc (maxList xs)
+    maxTwo !acc (L3Move (L3Abs i)) = max acc i
+    maxTwo !acc (L3Move (L3End))   = acc
+    maxTwo !acc (L3PtrInc _) = acc
 
+
+l2_to_l3 :: [L2BF] -> [L3BF]
+l2_to_l3 xs = convert xs where
         convert = concatMap go
 
         go (L2ValInc   i w) = [L3Move (L3Abs i), L3ValInc w]
         go (L2IOOutput i  ) = [L3Move (L3Abs i), L3IOOutput]
         go (L2IORead   i  ) = [L3Move (L3Abs i), L3IORead  ]
         go (L2While   i xs) = [L3Move (L3Abs i), L3While (convert xs ++ [L3Move (L3Abs i)])]
+        go (L2LowLevel  xs) = xs
 
 l1optimizer_simple :: [L1BF] -> [L1BF]
 l1optimizer_simple = id
@@ -92,6 +102,7 @@ l1optimizer_simple = id
 l1_to_l2 :: [L1BF] -> [L2BF]
 l1_to_l2 = concatMap comp where
         local0 = 0
+        comp (L1LowLevel xs) = [L2LowLevel xs]
         comp (L1ValInc a x) = [L2ValInc (a+16) x]
         comp (L1IOOutput a) = [L2IOOutput (a+16)]
         comp (L1IORead   a) = [L2IORead (a+16)]
@@ -132,8 +143,8 @@ compile_complete  _ p = Right (flip evalState (CK [] M.empty) $ do
                                 main    <- dk_lookup_fun "main"
                                 l1 <- compileFuncall mainRes main []
                                 let l2 = l1_to_l2 l1
-                                let (maxPtr, l3) = l2_to_l3 l2
-                                let bf = l3_to_bf maxPtr l3
+                                let l3 = l2_to_l3 l2
+                                let bf = l3_to_bf l3
                                 return (l1,l2,l3,bf))
 
 {- variables starting with # are reversed for compiler internals -}
@@ -272,23 +283,45 @@ compileFuncall resAddr (FunctionDef params stms) paramsAddrs = do
     dk_leave
     return (initCode ++ mainCode)
 
-{-
+compileEBF :: EBF -> State CompilerStack [L1BF]
+compileEBF x = (\w -> [w]) <$> go x where
 
+    getPtr :: EPtr -> State CompilerStack Int64
+    getPtr (EAbs i) = return i
+    getPtr (EIndir (Ident x)) = dk_lookup x
 
-data Statement = CallE  !Expr
-               | Decl   !Ident
-               | Assign !Ident !Expr
-               | While  !Expr [Statement]
-               | IfThenElse !Expr [Statement] [Statement]
-               | Print !Expr
-               | Return !Expr
+    getPtrX :: EPtrX -> State CompilerStack L3Ptr
+    getPtrX (EAbsX i)  = return $ L3Abs i
+    getPtrX (EIndirX (Ident x)) = L3Abs <$> dk_lookup x
+    getPtrX (EEndX)             = return L3End
 
--}
+    go :: EBF -> State CompilerStack L1BF
+    go (EBValInc ptr w) = (\i -> L1ValInc i w) <$> getPtr ptr
+    go (EBIOOutput ptr) = L1IOOutput <$> getPtr ptr
+    go (EBIORead   ptr) = L1IORead   <$> getPtr ptr
+    go (EBWhile  ptr xs) = (\i rs -> L1While i rs) <$> getPtr ptr <*> (mapM go xs)
+    go (EBSet    ptr w)  = (\i -> L1Set i w) <$> getPtr ptr
+    go (EBCopy   p1 p2)  = (\i1 i2 -> L1Copy i1 i2) <$> getPtr p1 <*> getPtr p2
+    go (EBMove   p1 p2)  = (\i1 i2 -> L1Move i1 i2) <$> getPtr p1 <*> getPtr p2
+    go (EBLowLevel xs)   = L1LowLevel <$> compileLL xs
+
+    compileLL :: [ELLBF] -> State CompilerStack [L3BF]
+    compileLL prog = mapM ll prog
+
+    ll :: ELLBF -> State CompilerStack L3BF
+    ll (ELLValInc w)  = return $ L3ValInc w
+    ll (ELLIOOutput)  = return $ L3IOOutput
+    ll (ELLIORead)    = return $ L3IORead
+    ll (ELLPtrInc ix) = return $ L3PtrInc ix
+    ll (ELLWhile code) = (\code -> L3While code) <$> compileLL code
+    ll (ELLMove ptrx)  = L3Move <$> getPtrX ptrx
+
 compileStatements :: Int64 -> [Statement] -> State CompilerStack [L1BF]
 compileStatements resAddr [] = return []
 compileStatements resAddr (x:xs) =
     case x of
          Return expr -> compileExpr resAddr expr
+         EBF ebf -> (++) <$> compileEBF ebf <*> compileStatements resAddr xs
          CallE  expr -> (++) <$> compileExpr resAddr expr <*> compileStatements resAddr xs
          Decl   (Ident n) -> do dk_declare n
                                 compileStatements resAddr xs
