@@ -185,6 +185,12 @@ dk_declare_fun :: String -> [String] -> [Statement] -> State CompilerStack ()
 dk_declare_fun str params stms = modify (\(CK xs funs) ->
                                                 CK xs (M.insert str (FunctionDef params stms) funs))
 
+
+dk_alias :: String -> Int64 -> State CompilerStack Int64
+dk_alias xid addr = modify (\(CK xs funs) ->
+                            CK (f xs) funs) >> dk_lookup xid
+    where f q@((s, m) : ms) = (s , M.insert xid addr m) : ms
+          
 dk_declare :: String -> State CompilerStack Int64
 dk_declare xid = modify (\(CK xs funs) ->
                             CK (f xs) funs) >> dk_lookup xid
@@ -193,7 +199,7 @@ dk_declare xid = modify (\(CK xs funs) ->
           getCurrMax [] = 16 {- magic number, should be obtained from CompilerSettings -}
           getCurrMax ((_, m):xs) = case M.elems m of
                                         [] -> getCurrMax xs
-                                        mm -> maximum mm
+                                        mm -> max (maximum mm) (getCurrMax xs) {- because aliases -}
 
 
 dk_lookup_fun :: String -> State CompilerStack FunctionDef
@@ -333,7 +339,6 @@ compileStatements resAddr (x:xs) =
                            dk_leave
                            rest <- compileStatements resAddr xs
                            return (cod ++ [L1IOOutput p_r] ++ rest)
-                           
          While expr stms -> do dk_enter "#while"
                                cnd <- dk_declare "#while_cond"
                                condCode <- compileExpr cnd expr
