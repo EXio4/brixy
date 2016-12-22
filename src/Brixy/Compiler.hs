@@ -102,7 +102,14 @@ l1optimizer_simple = id
 l1_to_l2 :: [L1BF] -> [L2BF]
 l1_to_l2 = concatMap comp where
         local0 = 0
-        comp (L1LowLevel xs) = [L2LowLevel xs]
+        transAddr f x@L3ValInc{}   = x
+        transAddr f x@L3IOOutput{} = x
+        transAddr f x@L3IORead{}   = x
+        transAddr f x@L3PtrInc{}   = x
+        transAddr f (L3While cs)   = L3While (map (transAddr f) cs)
+        transAddr f x@(L3Move L3End) = x
+        transAddr f (L3Move (L3Abs i)) = L3Move (L3Abs (f i))
+        comp (L1LowLevel xs) = [L2LowLevel (map (transAddr (+16)) xs)]
         comp (L1ValInc a x) = [L2ValInc (a+16) x]
         comp (L1IOOutput a) = [L2IOOutput (a+16)]
         comp (L1IORead   a) = [L2IORead (a+16)]
@@ -126,7 +133,7 @@ data CompilerSettings = CompilerSettings {
 
 defSettings = CompilerSettings
 
-data FunctionDef = FunctionDef [String] [Statement]
+data FunctionDef = FunctionDef [Param] [Statement]
 
 data CompilerError = VariableNotFound {- `stack` trace -} [Ident] !Ident
                    | FuckedUp
@@ -153,7 +160,7 @@ genCompilerStack :: Program -> State CompilerStack ()
 genCompilerStack (Module _ defs) = do dk_enter "global_table"
                                       forM_ defs $ \x -> case x of
                                           Declaration (Ident n) -> dk_declare n >> return ()
-                                          Function (Ident xid) params stms -> dk_declare_fun xid (map (\(Ident i) -> i) params) stms
+                                          Function (Ident xid) params stms -> dk_declare_fun xid params stms
 
 data CompilerStack = CK {
      ck_curr_stack :: [(String,M.Map String Int64)] {- every element represents a block + the name of it -}
@@ -181,7 +188,7 @@ dk_lookup xid = do CK xs _ <- get
                                         Just p  -> p
                    return (go xs)
 
-dk_declare_fun :: String -> [String] -> [Statement] -> State CompilerStack ()
+dk_declare_fun :: String -> [Param] -> [Statement] -> State CompilerStack ()
 dk_declare_fun str params stms = modify (\(CK xs funs) ->
                                                 CK xs (M.insert str (FunctionDef params stms) funs))
 
@@ -213,63 +220,16 @@ compileExpr :: Int64 -> Expr -> State CompilerStack [L1BF]
 compileExpr resAddr (VL (Ident name)) = do i <- dk_lookup name
                                            return [L1Copy resAddr i]
 compileExpr resAddr (Lit w)           = do return [L1Set  resAddr w]
-compileExpr resAddr (Add e1 e2)       = do dk_enter "#addition"
-                                           i1 <- dk_declare "#e1"
-                                           i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr i1 e1
-                                           v2 <- compileExpr i2 e2
-                                           dk_leave
-                                           return (
-                                            [L1Set i1      0
-                                            ,L1Set i2      0] ++ v1 ++ v2 ++
-                                            [L1While i2
-                                                [L1ValInc i2 (-1)
-                                                ,L1ValInc i1 1
-                                                ]
-                                            ,L1Copy resAddr i1
-                                            ])
-compileExpr resAddr (Minus e1 e2)     = do dk_enter "#substraction"
-                                           i1 <- dk_declare "#e1"
-                                           i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr i1 e1
-                                           v2 <- compileExpr i2 e2
-                                           dk_leave
-                                           return (
-                                            [L1Set i1      0
-                                            ,L1Set i2      0] ++ v1 ++ v2 ++
-                                            [L1While i2
-                                                [L1ValInc i2 (-1)
-                                                ,L1ValInc i1 (-1)
-                                                ]
-                                            ,L1Copy resAddr i1
-                                            ])
-compileExpr resAddr (Equal e1 e2)     = do dk_enter "#equal"
-                                           i1 <- dk_declare "#e1"
-                                           i2 <- dk_declare "#e2"
-                                           v1 <- compileExpr i1 e1
-                                           v2 <- compileExpr i2 e2
-                                           dk_leave
-                                           return (
-                                            [L1Set i1      0
-                                            ,L1Set i2      0] ++ v1 ++ v2 ++
-                                            [L1While i1
-                                                [L1ValInc i1 (-1)
-                                                ,L1ValInc i2 (-1)
-                                                ]
-                                            ,L1ValInc i1 1
-                                            ,L1While i2
-                                                [L1ValInc i1 (-1)
-                                                ,L1Set    i2   0
-                                                ]
-                                            ,L1Copy resAddr i1
-                                            ])
-
 compileExpr resAddr (CallF (Ident n) exps) =  do dk_enter ("#funcall_expr_" ++ n)
-                                                 xs <- forM (zip [1..] exps) $ \(n,ex) -> do
-                                                                    i_n <- dk_declare ("#i_" ++ show n)
-                                                                    xcd <- compileExpr i_n ex
-                                                                    return (L1Set i_n 0 : xcd, i_n)
-                                                 fun <- dk_lookup_fun n
+                                                 fun@(FunctionDef params _) <- dk_lookup_fun n
+                                                 xs <- forM (zip [1..] (zip params exps)) $ \(n,(p, ex)) ->
+                                                                    case (p, ex) of
+                                                                         (ByRef{}, VL (Ident i)) -> (\i -> ([], i)) <$> dk_lookup i
+                                                                         (ByValue{},_) -> do
+                                                                                i_n <- dk_declare ("#i_" ++ show n)
+                                                                                xcd <- compileExpr i_n ex
+                                                                                return (L1Set i_n 0 : xcd, i_n)
+                                                                         (_, _) -> error "Passing by reference some weird shit, FIX this later"
                                                  res <- dk_declare "#res"
                                                  code <- compileFuncall res fun (map snd xs)
                                                  dk_leave
@@ -282,9 +242,14 @@ compileExpr resAddr (CallF (Ident n) exps) =  do dk_enter ("#funcall_expr_" ++ n
 compileFuncall :: Int64 -> FunctionDef -> [Int64] -> State CompilerStack [L1BF]
 compileFuncall resAddr (FunctionDef params stms) paramsAddrs = do
     dk_enter "#funcall"
-    initCode <- forM (zip params paramsAddrs) $ \(p,dr) -> do
-                                    new_addr <- dk_declare p
-                                    return (L1Copy new_addr dr)
+    initCode <- fmap concat $ forM (zip params paramsAddrs) $ \(p,dr) -> do
+                                    case p of
+                                         ByValue (Ident r) -> do
+                                             new_addr <- dk_declare r
+                                             return [L1Copy new_addr dr]
+                                         ByRef   (Ident r) -> do
+                                             dk_alias r dr
+                                             return []
     mainCode <- compileStatements resAddr stms
     dk_leave
     return (initCode ++ mainCode)
@@ -333,12 +298,6 @@ compileStatements resAddr (x:xs) =
                                 compileStatements resAddr xs
          Assign (Ident n) expr -> do ir <- dk_lookup n
                                      (++) <$> compileExpr ir expr <*> compileStatements resAddr xs
-         Print  expr -> do dk_enter "#print"
-                           p_r <- dk_declare "#pr_result"
-                           cod <- compileExpr p_r expr
-                           dk_leave
-                           rest <- compileStatements resAddr xs
-                           return (cod ++ [L1IOOutput p_r] ++ rest)
          While expr stms -> do dk_enter "#while"
                                cnd <- dk_declare "#while_cond"
                                condCode <- compileExpr cnd expr
