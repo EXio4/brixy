@@ -22,7 +22,7 @@ executable brixy
                       ,Brixy.AST
                       ,Brixy.Compiler
   -- other-extensions:    
-  build-depends:       base >=4.9 && <4.10
+  build-depends:       base
                       ,containers
                       ,transformers
 
