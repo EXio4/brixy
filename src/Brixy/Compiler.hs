@@ -142,12 +142,16 @@ data CompilerError = VariableNotFound {- `stack` trace -} [Ident] !Ident
 compile :: CompilerSettings -> Program -> Either CompilerError BF.Program
 compile s p = fmap (\(_, _, _, p) -> p) (compile_complete s p)
 
+moduleLookup :: [Module] -> ModuleName -> Module
+moduleLookup xs m = case find (\(Module name _) -> name == m) xs of
+                        Nothing -> error $ "Module " ++ m ++ " not found"
+                        Just v  -> v
 
 compile_complete :: CompilerSettings -> Program -> Either CompilerError ([L1BF], [L2BF], [L3BF], BF.Program)
-compile_complete  _ p = Right (flip evalState (CK [] M.empty) $ do
-                                genCompilerStack p
+compile_complete  _ (Program mods) = Right (flip evalState (CK [] M.empty []) $ do
+                                genCompilerStack mods (moduleLookup mods "Main")
                                 mainRes <- dk_declare "#main_res"
-                                main    <- dk_lookup_fun "main"
+                                main    <- dk_lookup_fun "Main.main"
                                 l1 <- compileFuncall mainRes main []
                                 let l2 = l1_to_l2 l1
                                 let l3 = l2_to_l3 l2
@@ -156,16 +160,73 @@ compile_complete  _ p = Right (flip evalState (CK [] M.empty) $ do
 
 {- variables starting with # are reversed for compiler internals -}
 
-genCompilerStack :: Program -> State CompilerStack ()
-genCompilerStack (Module _ defs) = do dk_enter "global_table"
-                                      forM_ defs $ \x -> case x of
-                                          Declaration (Ident n) -> dk_declare n >> return ()
-                                          Function (Ident xid) params stms -> dk_declare_fun xid params stms
+addModuleName :: ModuleName -> String -> String
+addModuleName new str | Nothing <- find (=='.') str = new ++ "." ++ str
+                      | otherwise = str
+
+addModuleName'p :: ModuleName -> [Param] -> [Param]
+addModuleName'p name ps = map go ps
+    where go (ByRef (Ident r)) = ByRef (Ident (addModuleName name r))
+          go (ByValue (Ident r)) = ByValue (Ident (addModuleName name r))
+
+addModuleName' :: ModuleName -> [Statement] -> [Statement]
+addModuleName' name = map goS where
+    goS (CallE e) = CallE (goE e)
+    goS (EBF bf) = EBF (goBF bf)
+    goS (Decl id) = Decl (add id)
+    goS (Assign id ex) = Assign (add id) (goE ex)
+    goS (While ex so) = While (goE ex) (map goS so)
+    goS (IfThenElse cond true false) = IfThenElse (goE cond) (map goS true) (map goS false)
+    goS (Return re) = Return (goE re)
+
+    goE (VL id) = VL (add id)
+    goE (Lit o) = Lit o
+    goE (CallF f ex) = CallF (add f) (map goE ex)
+
+    goBF (EBValInc ptr w) = EBValInc (add'ptr ptr) w
+    goBF (EBIOOutput ptr) = EBIOOutput (add'ptr ptr)
+    goBF (EBIORead ptr) = EBIORead (add'ptr ptr)
+    goBF (EBWhile ptr ws) = EBWhile (add'ptr ptr) (map goBF ws)
+    goBF (EBSet ptr w) = EBSet (add'ptr ptr) w
+    goBF (EBCopy p1 p2) = EBCopy (add'ptr p1) (add'ptr p2)
+    goBF (EBMove p1 p2) = EBCopy (add'ptr p1) (add'ptr p2)
+    goBF (EBLowLevel low) = EBLowLevel (map goLow low)
+
+    goLow (ELLValInc w) = ELLValInc w
+    goLow (ELLIOOutput) = ELLIOOutput
+    goLow (ELLIORead)   = ELLIORead
+    goLow (ELLWhile w)  = ELLWhile (map goLow w)
+    goLow (ELLPtrInc i)  = ELLPtrInc i
+    goLow (ELLMove ptrx) = ELLMove (add'x ptrx)
+
+    add (Ident i) = Ident (addModuleName name i)
+    
+    add'ptr (EAbs i) = EAbs i
+    add'ptr (EIndir i) = EIndir (add i)
+
+    add'x (EAbsX i) = EAbsX i
+    add'x (EIndirX i) = EIndirX (add i)
+    add'x (EEndX) = EEndX
+ 
+genCompilerStack :: [Module] -> Module -> State CompilerStack ()
+genCompilerStack mods (Module name defs) =
+                                   do CK stk funs lods <- get
+                                      case find (\n -> n == name) lods of
+                                        Just reg -> return () -- module already registered
+                                        Nothing -> do
+                                            put (CK stk funs (name : lods))
+                                            dk_enter ("module_" ++ name)
+                                            forM_ defs $ \x -> case x of
+                                                Import nm -> genCompilerStack mods (moduleLookup mods nm)
+                                                Declaration (Ident n) -> dk_declare (addModuleName name n) >> return ()
+                                                Function (Ident xid) params stms -> dk_declare_fun (addModuleName name xid) (addModuleName'p name params) (addModuleName' name stms)
 
 data CompilerStack = CK {
      ck_curr_stack :: [(String,M.Map String Int64)] {- every element represents a block + the name of it -}
     ,ck_funs       :: M.Map String FunctionDef
+    ,ck_regs_mods  :: [ModuleName]
 }
+
 
 {- main operations done on the CS
     * enter a new scope
@@ -174,14 +235,14 @@ data CompilerStack = CK {
     * declare a variable
 -}
 dk_enter :: String -> State CompilerStack ()
-dk_enter snam = modify (\(CK xs funs) -> CK ((snam,M.empty) : xs) funs)
+dk_enter snam = modify (\(CK xs funs rgs) -> CK ((snam,M.empty) : xs) funs rgs)
 
 {- NOTE: if we're at the "top-level" scope, we simply do nothing -}
 dk_leave :: State CompilerStack ()
-dk_leave = modify (\(CK xs funs) -> CK (case xs of [x] -> [x] ; (_ : xs) -> xs) funs)
+dk_leave = modify (\(CK xs funs rgs) -> CK (case xs of [x] -> [x] ; (_ : xs) -> xs) funs rgs)
 
 dk_lookup :: String -> State CompilerStack Int64
-dk_lookup xid = do CK xs _ <- get
+dk_lookup xid = do CK xs _ _ <- get
                    let go [] = error $ "Variable not found, should never happen \nCalltrace: " ++ show (map fst xs)
                        go ((_,m):ms) = case M.lookup xid m of
                                         Nothing -> go ms
@@ -189,18 +250,18 @@ dk_lookup xid = do CK xs _ <- get
                    return (go xs)
 
 dk_declare_fun :: String -> [Param] -> [Statement] -> State CompilerStack ()
-dk_declare_fun str params stms = modify (\(CK xs funs) ->
-                                                CK xs (M.insert str (FunctionDef params stms) funs))
+dk_declare_fun str params stms = modify (\(CK xs funs rgs) ->
+                                                CK xs (M.insert str (FunctionDef params stms) funs) rgs)
 
 
 dk_alias :: String -> Int64 -> State CompilerStack Int64
-dk_alias xid addr = modify (\(CK xs funs) ->
-                            CK (f xs) funs) >> dk_lookup xid
+dk_alias xid addr = modify (\(CK xs funs rgs) ->
+                            CK (f xs) funs rgs) >> dk_lookup xid
     where f q@((s, m) : ms) = (s , M.insert xid addr m) : ms
           
 dk_declare :: String -> State CompilerStack Int64
-dk_declare xid = modify (\(CK xs funs) ->
-                            CK (f xs) funs) >> dk_lookup xid
+dk_declare xid = modify (\(CK xs funs rgs) ->
+                            CK (f xs) funs rgs) >> dk_lookup xid
     where f q@((s, m) : ms) = (s , M.insert xid (getCurrMax q + 1) m) : ms
           getCurrMax :: [(String, M.Map String Int64)] -> Int64
           getCurrMax [] = 16 {- magic number, should be obtained from CompilerSettings -}
@@ -210,7 +271,8 @@ dk_declare xid = modify (\(CK xs funs) ->
 
 
 dk_lookup_fun :: String -> State CompilerStack FunctionDef
-dk_lookup_fun xid = do CK _ funs <- get
+dk_lookup_fun  xid =
+                    do CK _ funs _ <- get
                        case M.lookup xid funs of
                             Nothing -> error $ "Function should be around here (" ++ xid ++ ")"
                             Just  v -> return v

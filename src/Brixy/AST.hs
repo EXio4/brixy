@@ -5,14 +5,20 @@ import Data.Word
 
 type ModuleName = String
 
-data Program = Module !ModuleName [Decl]
+
+data Module = Module !ModuleName [Decl]
+    deriving (Show)
+
+
+data Program = Program [Module]
     deriving (Show)
 
 data Param = ByValue !Ident
            | ByRef   !Ident
     deriving (Show)
 
-data Decl = Declaration !Ident
+data Decl = Import !ModuleName
+          | Declaration !Ident
           | Function    !Ident [Param] [Statement]
     deriving (Show)
           {- ^ they're basically macros which get inlined on every call -}
@@ -63,13 +69,15 @@ data ELLBF = ELLValInc !Word8
     deriving (Show)
 
 prettyPrint :: Program -> String
-prettyPrint = (`go1` []) where
+prettyPrint = (`go0` []) where
     smap :: (a -> (x -> x)) -> [a] -> (x -> x)
     smap f = foldr (.) id . map f
     k = (++)
     goh s [] = k ""
     goh s [x] = k (s x)
     goh s (x : xs) = k (s x) . k ", " . goh s xs
+
+    go0 (Program xs) = smap go1 xs
 
     go1 (Module name decls) = k "module " . k name . k "\n\n" . smap go2 decls
     go2 (Declaration (Ident name)) = k "var " . k name . k ";\n\n"
