@@ -79,15 +79,19 @@ prettyPrint = (`go0` []) where
 
     go0 (Program xs) = smap go1 xs
 
-    go1 (Module name decls) = k "module " . k name . k "\n\n" . smap go2 decls
+    go1 (Module name decls) = k "module " . k name . k "\n\n" . smap go2 decls . k "#############################################################\n"
+    go2 (Import s) = k "import " . k s . k ";\n"
     go2 (Declaration (Ident name)) = k "var " . k name . k ";\n\n"
     go2 (Function (Ident name) params stms)
-                        = k "function " . k name . k "(" . goh show params
+                        = k "function " . k name . k "(" . goh showP params
                                                  . k ")"
                                                  . gos 1 stms . k ";\n\n"
 
     gos n stms = k "{\n" . smap (\s -> (replicate (4*n) ' '++) . go3 n s . k ";\n") stms
                  . (replicate (4 * (n-1)) ' ' ++) . k "}"
+
+    showP (ByRef (Ident i)) = "&" ++ i
+    showP (ByValue (Ident i)) = i
 
     go3 _ (CallE ex) = go4 ex
     go3 _ (EBF{}) = k "<internal bf code>"
@@ -95,7 +99,7 @@ prettyPrint = (`go0` []) where
     go3 _ (Assign (Ident name) expr) = k name . k " := " . go4 expr
     go3 n (While  expr stms) = k "while (" . go4 expr . k ") " . gos (n+1) stms
     go3 n (IfThenElse cond true false) = k "if (" . go4 cond . k ") " . gos (n+1) true . k " else " . gos (n+1) false
-    go3 _ (Return expr) = k "return#(" . go4 expr . k ")"
+    go3 _ (Return expr) = k "return (" . go4 expr . k ")"
     
     go4 (VL (Ident name)) = k name
     go4 (Lit w) = k (show w)
